@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -37,10 +38,16 @@ private:
 
 class Elevator {
 public:
-    // Contructor
-    explicit Elevator(int startFloor = 0) : floor_(startFloor), direction_(Direction::IDLE) {}
+    explicit Elevator(int startFloor = 0, int minFloor = 0, int maxFloor = 9)
+        : floor_(startFloor), minFloor_(minFloor), maxFloor_(maxFloor),
+          direction_(Direction::IDLE) {
+        if (minFloor > maxFloor || startFloor < minFloor || startFloor > maxFloor) {
+            throw std::invalid_argument("Invalid elevator floor range");
+        }
+    }
 
     bool addRequest(const Request& request) {
+        validateFloor(request.getFloor());
         if (containsRequest(request)) {
             return false;
         }
@@ -54,38 +61,22 @@ public:
             return;
         }
 
-        if (direction_ == Direction::IDLE) {
-            Request* nearestRequest = findNearestRequest();
-            if (nearestRequest == nullptr) {
-                direction_ = Direction::IDLE;
-                return;
-            }
-
-            direction_ = nearestRequest->getFloor() > floor_ ? Direction::UP : Direction::DOWN;
-        }
-
-        RequestType hallType = (direction_ == Direction::UP)
-            ? RequestType::PICKUP_UP
-            : RequestType::PICKUP_DOWN;
-
-        Request hallRequest(floor_, hallType);
-        Request destinationRequest(floor_, RequestType::DESTINATION);
-
-        if (containsRequest(hallRequest) || containsRequest(destinationRequest)) {
-            removeRequest(hallRequest);
-            removeRequest(destinationRequest);
-            stop();
+        if (hasRequestAtCurrentFloor()) {
+            removeRequestsAtCurrentFloor();
+            direction_ = chooseDirection();
             return;
         }
 
-        if (!hasRequestAhead(direction_)) {
-            direction_ = (direction_ == Direction::UP) ? Direction::DOWN : Direction::UP;
+        if (direction_ == Direction::IDLE || !hasRequestAhead(direction_)) {
+            direction_ = chooseDirection();
         }
 
-        if (direction_ == Direction::UP) {
+        if (direction_ == Direction::UP && floor_ < maxFloor_) {
             ++floor_;
-        } else if (direction_ == Direction::DOWN) {
+        } else if (direction_ == Direction::DOWN && floor_ > minFloor_) {
             --floor_;
+        } else {
+            direction_ = chooseDirection();
         }
     }
 
@@ -98,6 +89,12 @@ public:
     }
 
 private:
+    void validateFloor(int floor) const {
+        if (floor < minFloor_ || floor > maxFloor_) {
+            throw std::invalid_argument("Floor is outside the elevator range");
+        }
+    }
+
     bool containsRequest(const Request& request) const {
         for (const auto& existingRequest : requests_) {
             if (existingRequest == request) {
@@ -107,12 +104,15 @@ private:
         return false;
     }
 
-    void removeRequest(const Request& request) {
+    bool hasRequestAtCurrentFloor() const {
+        return std::any_of(requests_.begin(), requests_.end(),
+            [this](const Request& request) { return request.getFloor() == floor_; });
+    }
+
+    void removeRequestsAtCurrentFloor() {
         requests_.erase(
             std::remove_if(requests_.begin(), requests_.end(),
-                [&request](const Request& existingRequest) {
-                    return existingRequest == request;
-                }),
+                [this](const Request& request) { return request.getFloor() == floor_; }),
             requests_.end());
     }
 
@@ -131,6 +131,14 @@ private:
         return nearest;
     }
 
+    Direction chooseDirection() {
+        Request* nearest = findNearestRequest();
+        if (nearest == nullptr || nearest->getFloor() == floor_) {
+            return Direction::IDLE;
+        }
+        return nearest->getFloor() > floor_ ? Direction::UP : Direction::DOWN;
+    }
+
     bool hasRequestAhead(Direction dir) const {
         for (const auto& request : requests_) {
             if (dir == Direction::UP && request.getFloor() > floor_) {
@@ -144,21 +152,26 @@ private:
     }
 
     int floor_;
+    int minFloor_;
+    int maxFloor_;
     Direction direction_;
     std::vector<Request> requests_;
 };
 
 class ElevatorController {
 public:
-    // Constructor
-    ElevatorController() {
-        elevators_.emplace_back(Elevator(0));
-        elevators_.emplace_back(Elevator(0));
-        elevators_.emplace_back(Elevator(0));
+    ElevatorController(int elevatorCount = 3, int minFloor = 0, int maxFloor = 9)
+        : minFloor_(minFloor), maxFloor_(maxFloor) {
+        if (elevatorCount <= 0 || minFloor > maxFloor) {
+            throw std::invalid_argument("Invalid controller configuration");
+        }
+        for (int i = 0; i < elevatorCount; ++i) {
+            elevators_.emplace_back(minFloor_, minFloor_, maxFloor_);
+        }
     }
 
     bool requestElevator(int floor, RequestType type) {
-        if (floor < 0 || floor > 9) {
+        if (floor < minFloor_ || floor > maxFloor_) {
             throw std::invalid_argument("Not a valid floor");
         }
 
@@ -183,6 +196,10 @@ public:
 
 private:
     Elevator* findMovingToward(const Request& request) {
+        if (request.getType() == RequestType::DESTINATION) {
+            return nullptr;
+        }
+
         Direction direction = (request.getType() == RequestType::PICKUP_UP)
             ? Direction::UP
             : Direction::DOWN;
@@ -261,26 +278,32 @@ private:
         return findNearest(request.getFloor());
     }
 
+    int minFloor_;
+    int maxFloor_;
     std::vector<Elevator> elevators_;
 };
 
 int main() {
-    ElevatorController controller;
-
-    std::cout << "Requesting elevator at floor 5 going UP: "
-              << controller.requestElevator(5, RequestType::PICKUP_UP) << std::endl;
-
-    std::cout << "Requesting elevator at floor 8 going DOWN: "
-              << controller.requestElevator(8, RequestType::PICKUP_DOWN) << std::endl;
-
-    for (int i = 0; i < 10; ++i) {
-        controller.step();
-        for (const auto& elevator : controller.getElevators()) {
-            std::cout << "Elevator floor: " << elevator.getFloor()
-                      << ", direction: " << static_cast<int>(elevator.getDirection())
-                      << std::endl;
-        }
+    Elevator elevator;
+    assert(elevator.addRequest(Request(3, RequestType::PICKUP_UP)));
+    assert(!elevator.addRequest(Request(3, RequestType::PICKUP_UP)));
+    for (int step = 0; step < 3; ++step) {
+        elevator.step();
     }
+    assert(elevator.getFloor() == 3);
+    elevator.step();
+    assert(elevator.getDirection() == Direction::IDLE);
+    assert(elevator.getRequests().empty());
+
+    ElevatorController controller;
+    assert(controller.requestElevator(8, RequestType::PICKUP_DOWN));
+
+    for (int i = 0; i < 9; ++i) {
+        controller.step();
+    }
+    assert(controller.getElevators()[0].getRequests().empty());
+
+    std::cout << "Elevator self-checks passed.\n";
 
     return 0;
 }
